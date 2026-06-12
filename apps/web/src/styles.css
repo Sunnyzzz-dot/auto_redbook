@@ -330,13 +330,40 @@ pre {
   padding-top: 14px;
 }
 
-.remote img {
+.remote-frame {
   border: 1px solid #d7dde5;
   border-radius: 8px;
+  display: block;
+  max-height: 620px;
+  overflow: auto;
+  padding: 8px;
+}
+
+.remote img {
   cursor: crosshair;
-  max-height: 520px;
-  object-fit: contain;
-  width: 100%;
+  display: block;
+  height: auto;
+  max-width: none;
+  min-width: 360px;
+}
+
+.remote-input {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.remote-actions {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.compact {
+  gap: 8px;
+}
+
+.secondary.danger {
+  color: #9f1d35;
 }
 
 @keyframes spin {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from urllib.parse import urlencode
 
 import websockets
 
@@ -10,10 +11,10 @@ from worker.publisher import PublishResult, XiaohongshuPublisher, screenshot_to_
 
 
 async def run_worker() -> None:
-    uri = (
-        f"{settings.api_ws_url}/api/workers/connect"
-        f"?worker_id={settings.worker_id}&machine_name={settings.machine_name}"
-    )
+    query = {"worker_id": settings.worker_id, "machine_name": settings.machine_name}
+    if settings.worker_token:
+        query["token"] = settings.worker_token
+    uri = f"{settings.api_ws_url}/api/workers/connect?{urlencode(query)}"
     publisher = XiaohongshuPublisher()
 
     while True:

@@ -8,6 +8,7 @@ class WorkerSettings(BaseSettings):
 
     api_base_url: str = "http://localhost:8000"
     api_ws_url: str = "ws://localhost:8000"
+    worker_token: str = ""
     worker_id: str = "local-worker"
     machine_name: str = "local-machine"
     browser_profiles_dir: str = "profiles"
@@ -17,4 +18,3 @@ class WorkerSettings(BaseSettings):
 
 
 settings = WorkerSettings()
-

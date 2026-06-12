@@ -23,8 +23,10 @@ class TextModelClient:
         fallback: dict[str, Any],
         temperature: float = 0.7,
     ) -> dict[str, Any]:
-        if not self.api_key and self.settings.allow_mock_models:
-            return fallback
+        if not self.api_key:
+            if self.settings.allow_mock_models:
+                return fallback
+            raise RuntimeError("model_api_key_missing")
 
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         payload = {
@@ -69,8 +71,10 @@ class ImageModelClient:
         ratio: str,
         run_id: str,
     ) -> list[dict[str, Any]]:
-        if not self.api_key and self.settings.allow_mock_models:
-            return [self._mock_image(prompt, ratio, run_id, index) for index, prompt in enumerate(prompts)]
+        if not self.api_key:
+            if self.settings.allow_mock_models:
+                return [self._mock_image(prompt, ratio, run_id, index) for index, prompt in enumerate(prompts)]
+            raise RuntimeError("model_api_key_missing")
 
         results: list[dict[str, Any]] = []
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
@@ -85,10 +89,9 @@ class ImageModelClient:
                 response = await client.post("/images/generations", headers=headers, json=payload)
                 response.raise_for_status()
                 body = response.json()
-                image_b64 = body["data"][0]["b64_json"]
-                data = base64.b64decode(image_b64)
-                key = stable_asset_key(f"generated/{run_id}", data, "png")
-                url = self.storage.put_bytes(key, data, "image/png")
+                data, content_type, extension = await self._image_bytes_from_response(client, body)
+                key = stable_asset_key(f"generated/{run_id}", data, extension)
+                url = self.storage.put_bytes(key, data, content_type)
                 results.append(
                     {
                         "image_url": url,
@@ -99,6 +102,28 @@ class ImageModelClient:
                     }
                 )
         return results
+
+    async def _image_bytes_from_response(
+        self, client: httpx.AsyncClient, body: dict[str, Any]
+    ) -> tuple[bytes, str, str]:
+        data_items = body.get("data") or []
+        if not data_items:
+            raise RuntimeError("image_model_response_empty")
+        item = data_items[0]
+        if item.get("b64_json"):
+            return base64.b64decode(item["b64_json"]), "image/png", "png"
+        if item.get("url"):
+            response = await client.get(item["url"])
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "image/png").split(";")[0].strip()
+            extension = {
+                "image/jpeg": "jpg",
+                "image/jpg": "jpg",
+                "image/png": "png",
+                "image/webp": "webp",
+            }.get(content_type, "png")
+            return response.content, content_type, extension
+        raise RuntimeError("image_model_response_missing_image")
 
     def _mock_image(self, prompt: str, ratio: str, run_id: str, index: int) -> dict[str, Any]:
         svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1200">
@@ -128,4 +153,3 @@ class ImageModelClient:
             "4:3": "1152x864",
             "9:16": "720x1280",
         }.get(ratio, "864x1152")
-

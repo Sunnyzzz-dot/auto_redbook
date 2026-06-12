@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,12 @@ class ActiveBrowserSession:
     page: Page
     job: dict[str, Any]
     stage: str
+
+
+def _png_dimensions(image: bytes) -> tuple[int | None, int | None]:
+    if len(image) >= 24 and image.startswith(b"\x89PNG\r\n\x1a\n"):
+        return struct.unpack(">II", image[16:24])
+    return None, None
 
 
 class XiaohongshuPublisher:
@@ -81,25 +88,149 @@ class XiaohongshuPublisher:
         context = session.context
         page = session.page
         event_type = event.get("type")
+        last_click: dict[str, Any] | None = None
         if event_type == "click":
-            await page.mouse.click(float(event.get("x", 0)), float(event.get("y", 0)))
+            viewport = page.viewport_size or {"width": 1920, "height": 1080}
+            screenshot_size = page.context.__dict__.get("remote_screenshot_size") or {}
+            metrics = await page.evaluate(
+                """
+                () => {
+                  const visual = window.visualViewport;
+                  const htmlStyle = window.getComputedStyle(document.documentElement);
+                  return {
+                    inner_width: window.innerWidth,
+                    inner_height: window.innerHeight,
+                    outer_width: window.outerWidth,
+                    outer_height: window.outerHeight,
+                    device_pixel_ratio: window.devicePixelRatio,
+                    visual_width: visual ? visual.width : null,
+                    visual_height: visual ? visual.height : null,
+                    visual_scale: visual ? visual.scale : null,
+                    visual_offset_left: visual ? visual.offsetLeft : 0,
+                    visual_offset_top: visual ? visual.offsetTop : 0,
+                    html_zoom: htmlStyle.zoom || '',
+                  };
+                }
+                """
+            )
+            page_width = float(metrics.get("inner_width") or viewport["width"])
+            page_height = float(metrics.get("inner_height") or viewport["height"])
+            source_width = float(
+                event.get("natural_width")
+                or screenshot_size.get("width")
+                or event.get("display_width")
+                or page_width
+            )
+            source_height = float(
+                event.get("natural_height")
+                or screenshot_size.get("height")
+                or event.get("display_height")
+                or page_height
+            )
+            basis_width = float(
+                metrics.get("visual_width")
+                or page_width
+            )
+            basis_height = float(
+                metrics.get("visual_height")
+                or page_height
+            )
+            offset_x = float(metrics.get("visual_offset_left") or 0)
+            offset_y = float(metrics.get("visual_offset_top") or 0)
+            if "rx" in event and "ry" in event:
+                rx = max(0.0, min(1.0, float(event.get("rx", 0))))
+                ry = max(0.0, min(1.0, float(event.get("ry", 0))))
+                x = offset_x + rx * basis_width
+                y = offset_y + ry * basis_height
+            else:
+                source_x = float(event.get("x", 0))
+                source_y = float(event.get("y", 0))
+                rx = source_x / source_width
+                ry = source_y / source_height
+                x = offset_x + rx * basis_width
+                y = offset_y + ry * basis_height
+            x = max(0.0, min(float(viewport["width"]) - 1, x))
+            y = max(0.0, min(float(viewport["height"]) - 1, y))
+            last_click = {
+                "x": x,
+                "y": y,
+                "rx": rx,
+                "ry": ry,
+                "basis_width": basis_width,
+                "basis_height": basis_height,
+                "source_width": source_width,
+                "source_height": source_height,
+                "viewport_width": viewport["width"],
+                "viewport_height": viewport["height"],
+                "page_width": page_width,
+                "page_height": page_height,
+                "visual_scale": metrics.get("visual_scale"),
+                "html_zoom": metrics.get("html_zoom"),
+                "display_width": event.get("display_width"),
+                "display_height": event.get("display_height"),
+                "natural_width": event.get("natural_width"),
+                "natural_height": event.get("natural_height"),
+            }
+            await page.mouse.click(x, y)
         elif event_type == "type":
             await page.keyboard.type(str(event.get("text", "")))
+        elif event_type == "backspace":
+            count = max(1, min(100, int(event.get("count", 1))))
+            for _ in range(count):
+                await page.keyboard.press("Backspace")
         elif event_type == "press":
             await page.keyboard.press(str(event.get("key", "Enter")))
         elif event_type == "scroll":
             await page.mouse.wheel(float(event.get("dx", 0)), float(event.get("dy", 0)))
+        elif event_type == "scroll_top":
+            await page.keyboard.press("Home")
+            await page.evaluate("window.scrollTo(0, 0)")
+        elif event_type == "scroll_bottom":
+            await page.keyboard.press("End")
+            await page.evaluate(
+                """
+                () => {
+                  const root = document.scrollingElement || document.documentElement || document.body;
+                  root.scrollTop = root.scrollHeight;
+                  window.scrollTo(0, root.scrollHeight);
+                }
+                """
+            )
         elif event_type == "screenshot":
             pass
+        elif event_type == "reset_zoom":
+            await self._reset_browser_view(page)
         elif event_type == "zoom_out":
             await self._browser_zoom(page, int(event.get("steps", 2)))
         elif event_type == "zoom_in":
             await self._browser_zoom(page, -int(event.get("steps", 2)))
+        elif event_type == "close":
+            await context.close()
+            self._active_sessions.pop(job_id, None)
+            return self._job_status(job_id, "failed", failure_reason="remote_session_closed")
         elif event_type == "continue":
             return await self._continue_session(job_id, session)
-        screenshot = await page.screenshot(full_page=False)
+        screenshot = await page.screenshot(full_page=False, scale="css")
+        screenshot_width, screenshot_height = _png_dimensions(screenshot)
+        page.context.__dict__["remote_screenshot_size"] = {
+            "width": screenshot_width,
+            "height": screenshot_height,
+        }
         encoded = base64.b64encode(screenshot).decode("ascii")
-        return {"type": "browser_frame", "job_id": job_id, "image": f"data:image/png;base64,{encoded}"}
+        viewport = page.viewport_size or {}
+        return {
+            "type": "browser_frame",
+            "job_id": job_id,
+            "image": f"data:image/png;base64,{encoded}",
+            "width": screenshot_width or viewport.get("width"),
+            "height": screenshot_height or viewport.get("height"),
+            "viewport_width": viewport.get("width"),
+            "viewport_height": viewport.get("height"),
+            "url": page.url,
+            "event": event_type,
+            "zoom": page.context.__dict__.get("remote_zoom_factor", 1.0),
+            "last_click": last_click,
+        }
 
     async def _continue_session(self, job_id: str, session: ActiveBrowserSession) -> dict[str, Any]:
         context = session.context
@@ -352,6 +483,7 @@ class XiaohongshuPublisher:
         await page.wait_for_timeout(300)
 
     async def _reset_browser_view(self, page: Page) -> None:
+        page.context.__dict__["remote_zoom_factor"] = 1.0
         await page.keyboard.down("Control")
         try:
             await page.keyboard.press("0")
@@ -378,23 +510,28 @@ class XiaohongshuPublisher:
             await self._reset_browser_view(page)
         if steps == 0:
             return
-        key = "-" if steps > 0 else "="
-        await page.keyboard.down("Control")
-        try:
-            for _ in range(abs(steps)):
-                await page.keyboard.press(key)
-                await page.wait_for_timeout(80)
-        finally:
-            await page.keyboard.up("Control")
+        current = float(page.context.__dict__.get("remote_zoom_factor", 1.0))
+        factor = 0.9 ** steps if steps > 0 else 1.1 ** abs(steps)
+        next_zoom = max(0.45, min(1.8, current * factor))
+        page.context.__dict__["remote_zoom_factor"] = next_zoom
         try:
             client = await page.context.new_cdp_session(page)
             await client.send(
                 "Emulation.setPageScaleFactor",
-                {"pageScaleFactor": 0.65 if steps > 0 else 1},
+                {"pageScaleFactor": next_zoom},
             )
             await client.detach()
         except Exception:
             pass
+        await page.evaluate(
+            """
+            (zoom) => {
+              document.documentElement.style.zoom = String(zoom);
+              document.body.style.zoom = '';
+            }
+            """,
+            next_zoom,
+        )
         await page.wait_for_timeout(300)
 
     async def _click_publish(self, page: Page) -> bool:

@@ -7,7 +7,9 @@ from sqlalchemy.orm import selectinload
 
 from app.api.agent import serialize_draft
 from app.api.deps import get_current_user
+from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal, get_db
+from app.core.security import decode_access_token
 from app.models import BrowserSession, DraftImage, DraftNote, PublishJob, User, Worker, XhsAccount
 from app.schemas.publish import BrowserSessionResponse, PublishJobCreate, PublishJobResponse
 from app.services.storage import ObjectStorage
@@ -137,6 +139,10 @@ async def get_browser_session(
 async def workers_connect(websocket: WebSocket) -> None:
     worker_id = websocket.query_params.get("worker_id", "local-worker")
     machine_name = websocket.query_params.get("machine_name", worker_id)
+    expected_token = get_settings().worker_token
+    if expected_token and websocket.query_params.get("token") != expected_token:
+        await websocket.close(code=1008)
+        return
     await worker_hub.connect_worker(worker_id, websocket)
     async with AsyncSessionLocal() as db:
         worker = await db.get(Worker, worker_id)
@@ -199,6 +205,22 @@ async def handle_worker_message(worker_id: str, message: dict) -> None:
 
 @router.websocket("/browser-sessions/{session_id}")
 async def browser_session(websocket: WebSocket, session_id: str) -> None:
+    token = websocket.query_params.get("token", "")
+    try:
+        user_id = decode_access_token(token)
+    except ValueError:
+        await websocket.close(code=1008)
+        return
+    async with AsyncSessionLocal() as db:
+        session = await db.get(BrowserSession, session_id)
+        if not session or session.status != "active":
+            await websocket.close(code=1008)
+            return
+        job = await db.get(PublishJob, session.job_id)
+        if not job or job.user_id != user_id:
+            await websocket.close(code=1008)
+            return
+
     await worker_hub.connect_browser_session(session_id, websocket)
     await websocket.send_json(
         {

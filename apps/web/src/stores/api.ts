@@ -1,7 +1,9 @@
 import { reactive } from 'vue'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
-export const WS_BASE = API_BASE.replace(/^http/, 'ws')
+const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
+export const WS_BASE = API_BASE
+  ? API_BASE.replace(/^http/, 'ws')
+  : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`
 
 export type ApiState = {
   token: string

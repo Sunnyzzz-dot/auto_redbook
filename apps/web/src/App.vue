@@ -33,9 +33,16 @@ const modelKeys = ref<Array<{ id: string; provider: string; status: string }>>([
 const accounts = ref<Array<{ id: string; display_name: string; login_status: string; bound_worker_id: string | null }>>([])
 const publishJob = ref<Record<string, unknown> | null>(null)
 const browserFrame = ref('')
+const browserFrameWidth = ref(0)
+const browserFrameHeight = ref(0)
 const browserSessionId = ref('')
 const browserStatus = ref('')
 const browserError = ref('')
+const browserLastFrameAt = ref('')
+const remoteText = ref('')
+const remoteDismissed = ref(false)
+const remoteViewScale = ref(1)
+const lastRemoteClickText = ref('')
 let browserSocket: WebSocket | null = null
 
 const isAuthed = computed(() => Boolean(state.token))
@@ -43,6 +50,7 @@ const selectedDraft = computed(() => run.value?.draft)
 const needsBrowserSession = computed(() =>
   ['requires_human_intervention', 'awaiting_manual_approval'].includes(String(publishJob.value?.status || ''))
 )
+const showRemoteControl = computed(() => !remoteDismissed.value && (needsBrowserSession.value || Boolean(browserSessionId.value)))
 
 async function withLoading<T>(name: string, fn: () => Promise<T>) {
   if (loading.value) return
@@ -158,6 +166,9 @@ async function saveDraft() {
 async function publish() {
   if (!selectedDraft.value || !publishForm.accountId) return
   await withLoading('publish', async () => {
+    remoteDismissed.value = false
+    browserFrame.value = ''
+    browserSessionId.value = ''
     publishJob.value = await api<Record<string, unknown>>('/api/publish-jobs', {
       method: 'POST',
       body: JSON.stringify({
@@ -188,6 +199,7 @@ async function openRemoteControl() {
   const jobId = publishJob.value?.id
   if (!jobId) return
   await withLoading('remote', async () => {
+    remoteDismissed.value = false
     browserError.value = ''
     browserStatus.value = '连接中'
     if (typeof publishJob.value?.screenshot_url === 'string') {
@@ -196,13 +208,26 @@ async function openRemoteControl() {
     const session = await api<{ id: string }>(`/api/publish-jobs/${jobId}/browser-session`)
     browserSessionId.value = session.id
     browserSocket?.close()
-    browserSocket = new WebSocket(`${WS_BASE}/api/browser-sessions/${session.id}`)
+    browserSocket = new WebSocket(`${WS_BASE}/api/browser-sessions/${session.id}?token=${encodeURIComponent(state.token)}`)
     const socket = browserSocket
     browserSocket.onmessage = (event) => {
       const message = JSON.parse(event.data)
+      if (message.type === 'session_ready') {
+        browserStatus.value = '已连接'
+      }
       if (message.image) {
         browserFrame.value = message.image
-        browserStatus.value = '已更新画面'
+        browserFrameWidth.value = Number(message.width || 0)
+        browserFrameHeight.value = Number(message.height || 0)
+        browserLastFrameAt.value = new Date().toLocaleTimeString()
+        const click = message.last_click
+        if (click) {
+          lastRemoteClickText.value =
+            ` · 点击 ${Math.round(Number(click.x))},${Math.round(Number(click.y))}` +
+            ` / 基准 ${Math.round(Number(click.basis_width || 0))}x${Math.round(Number(click.basis_height || 0))}` +
+            ` / 源图 ${Math.round(Number(click.source_width || 0))}x${Math.round(Number(click.source_height || 0))}`
+        }
+        browserStatus.value = `已更新画面 · 查看缩放 ${Math.round(remoteViewScale.value * 100)}%${lastRemoteClickText.value}`
       }
       if (message.error) browserError.value = String(message.error)
       if (message.type === 'job_status') {
@@ -216,15 +241,23 @@ async function openRemoteControl() {
         }
       }
     }
-    browserSocket.onclose = () => {
-      if (browserSocket === socket) browserStatus.value = '已断开'
+    browserSocket.onclose = (event) => {
+      if (browserSocket === socket) {
+        browserStatus.value = '已断开'
+        if (!event.wasClean) browserError.value = `远程连接已关闭：${event.code || 'unknown'}`
+      }
     }
     browserSocket.onerror = () => {
       browserError.value = '远程连接失败'
     }
-    await waitForSocketOpen(socket)
+    try {
+      await waitForSocketOpen(socket)
+    } catch (err) {
+      browserError.value = err instanceof Error ? err.message : String(err)
+      throw err
+    }
     browserStatus.value = '已连接'
-    socket.send(JSON.stringify({ type: 'screenshot' }))
+    socket.send(JSON.stringify({ type: 'reset_zoom' }))
   })
 }
 
@@ -251,29 +284,91 @@ async function sendBrowserEvent(event: Record<string, unknown>) {
   }
 }
 
+async function typeRemoteText() {
+  const text = remoteText.value
+  if (!text) return
+  await sendBrowserEvent({ type: 'type', text })
+}
+
+async function closeRemoteControl() {
+  if (browserSocket?.readyState === WebSocket.OPEN) {
+    browserSocket.send(JSON.stringify({ type: 'close' }))
+  }
+  browserSocket?.close()
+  browserSocket = null
+  browserSessionId.value = ''
+  browserFrame.value = ''
+  browserFrameWidth.value = 0
+  browserFrameHeight.value = 0
+  browserStatus.value = ''
+  browserError.value = ''
+  remoteText.value = ''
+  remoteViewScale.value = 1
+  lastRemoteClickText.value = ''
+  remoteDismissed.value = true
+  if (publishJob.value) {
+    publishJob.value = {
+      ...publishJob.value,
+      status: 'remote_closed',
+      failure_reason: 'remote_session_closed'
+    }
+  }
+}
+
 function waitForSocketOpen(socket: WebSocket) {
   if (socket.readyState === WebSocket.OPEN) return Promise.resolve()
   return new Promise<void>((resolve, reject) => {
-    const timer = window.setTimeout(() => reject(new Error('远程连接超时')), 8000)
-    socket.onopen = () => {
+    const cleanup = () => {
       window.clearTimeout(timer)
+      socket.removeEventListener('open', handleOpen)
+      socket.removeEventListener('error', handleError)
+      socket.removeEventListener('close', handleClose)
+    }
+    const handleOpen = () => {
+      cleanup()
       resolve()
     }
-    socket.onerror = () => {
-      window.clearTimeout(timer)
+    const handleError = () => {
+      cleanup()
       reject(new Error('远程连接失败'))
     }
+    const handleClose = (event: CloseEvent) => {
+      cleanup()
+      reject(new Error(`远程连接已关闭：${event.code || 'unknown'}`))
+    }
+    const timer = window.setTimeout(() => {
+      cleanup()
+      reject(new Error('远程连接超时'))
+    }, 8000)
+    socket.addEventListener('open', handleOpen)
+    socket.addEventListener('error', handleError)
+    socket.addEventListener('close', handleClose)
   })
+}
+
+function adjustRemoteViewScale(delta: number) {
+  remoteViewScale.value = Math.max(0.6, Math.min(2.2, Number((remoteViewScale.value + delta).toFixed(2))))
+  browserStatus.value = `查看缩放 ${Math.round(remoteViewScale.value * 100)}%`
 }
 
 function clickRemoteFrame(event: MouseEvent) {
   const image = event.currentTarget as HTMLImageElement
   const rect = image.getBoundingClientRect()
-  if (!image.naturalWidth || !image.naturalHeight) return
+  if (!rect.width || !rect.height) return
+  const rx = (event.clientX - rect.left) / rect.width
+  const ry = (event.clientY - rect.top) / rect.height
+  const naturalWidth = image.naturalWidth || browserFrameWidth.value || rect.width
+  const naturalHeight = image.naturalHeight || browserFrameHeight.value || rect.height
+  lastRemoteClickText.value =
+    ` · 已发送点击 ${Math.round(rx * naturalWidth)},${Math.round(ry * naturalHeight)}`
   sendBrowserEvent({
     type: 'click',
-    x: ((event.clientX - rect.left) / rect.width) * image.naturalWidth,
-    y: ((event.clientY - rect.top) / rect.height) * image.naturalHeight
+    rx: Math.max(0, Math.min(1, rx)),
+    ry: Math.max(0, Math.min(1, ry)),
+    display_width: rect.width,
+    display_height: rect.height,
+    natural_width: naturalWidth,
+    natural_height: naturalHeight
   })
 }
 
@@ -437,25 +532,44 @@ refreshSettings()
 
           <pre v-if="publishJob" class="job">{{ JSON.stringify(publishJob, null, 2) }}</pre>
 
-          <div v-if="needsBrowserSession || browserSessionId" class="remote">
+          <div v-if="showRemoteControl" class="remote">
             <div class="section-head">
               <h2>远程接管</h2>
-              <button class="secondary" @click="openRemoteControl"><Play />连接</button>
+              <div class="toolbar compact">
+                <button class="secondary" @click="openRemoteControl"><Play />连接</button>
+                <button class="secondary" :disabled="!browserSessionId" @click="sendBrowserEvent({ type: 'screenshot' })">
+                  <RefreshCw />刷新
+                </button>
+              </div>
             </div>
-            <p v-if="browserStatus" class="metric">{{ browserStatus }}</p>
+            <p v-if="browserStatus" class="metric">
+              {{ browserStatus }}
+              <span v-if="browserLastFrameAt"> · {{ browserLastFrameAt }}</span>
+              <span v-if="browserFrameWidth && browserFrameHeight"> · {{ browserFrameWidth }}×{{ browserFrameHeight }}</span>
+            </p>
             <p v-if="browserError" class="error">{{ browserError }}</p>
-            <img
-              v-if="browserFrame"
-              :src="browserFrame"
-              alt="远程浏览器画面"
-              @click="clickRemoteFrame"
-            />
-            <div class="toolbar">
-              <button class="secondary" @click="sendBrowserEvent({ type: 'scroll', dy: 500 })">向下</button>
-              <button class="secondary" @click="sendBrowserEvent({ type: 'zoom_out', steps: 2 })">缩小</button>
-              <button class="secondary" @click="sendBrowserEvent({ type: 'zoom_in', steps: 2 })">放大</button>
+            <div v-if="browserFrame" class="remote-frame">
+              <img
+                :src="browserFrame"
+                :style="{ width: `${remoteViewScale * 100}%` }"
+                alt="远程浏览器画面"
+                @click="clickRemoteFrame"
+              />
+            </div>
+            <div class="remote-input">
+              <input v-model="remoteText" placeholder="输入到远程浏览器" @keyup.enter="typeRemoteText" />
+              <button class="secondary" @click="typeRemoteText">输入</button>
+            </div>
+            <div class="toolbar remote-actions">
+              <button class="secondary" @click="sendBrowserEvent({ type: 'scroll', dy: -600 })">向上</button>
+              <button class="secondary" @click="sendBrowserEvent({ type: 'scroll', dy: 700 })">向下</button>
+              <button class="secondary" @click="adjustRemoteViewScale(-0.15)">缩小</button>
+              <button class="secondary" @click="adjustRemoteViewScale(0.15)">放大</button>
+              <button class="secondary" @click="sendBrowserEvent({ type: 'backspace', count: 1 })">退格</button>
+              <button class="secondary" @click="sendBrowserEvent({ type: 'backspace', count: 10 })">退格10</button>
               <button class="secondary" @click="sendBrowserEvent({ type: 'press', key: 'Enter' })">回车</button>
               <button @click="sendBrowserEvent({ type: 'continue' })"><CheckCircle2 />继续任务</button>
+              <button class="secondary danger" @click="closeRemoteControl">关闭接管</button>
             </div>
           </div>
         </div>
