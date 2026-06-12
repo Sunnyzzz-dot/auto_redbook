@@ -79,7 +79,7 @@ async def get_publish_asset(image_id: str, db: AsyncSession = Depends(get_db)) -
         data, content_type = ObjectStorage().get_bytes_for_url(image.image_url)
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Asset storage read failed") from exc
-    return Response(content=data, media_type=content_type)
+    return Response(content=data, media_type=content_type, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/publish-jobs/{job_id}", response_model=PublishJobResponse)

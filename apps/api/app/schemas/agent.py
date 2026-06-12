@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 class AgentRunCreate(BaseModel):
     instruction: str = Field(min_length=2, max_length=2000)
     image_count: int = Field(default=3, ge=1, le=9)
-    image_ratio: str = "3:4"
+    image_ratio: str = "2K"
     style_hint: str | None = None
     target_audience_hint: str | None = None
     mode: Literal["standard", "advanced"] = "standard"
@@ -73,4 +73,3 @@ class DraftUpdateRequest(BaseModel):
     body: str | None = None
     hashtags: list[str] | None = None
     image_order: list[str] | None = None
-

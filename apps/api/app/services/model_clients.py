@@ -40,7 +40,7 @@ class TextModelClient:
         }
         async with httpx.AsyncClient(base_url=self.settings.ark_base_url, timeout=60) as client:
             response = await client.post("/chat/completions", headers=headers, json=payload)
-            response.raise_for_status()
+            _raise_for_status(response, "doubao_text_request_failed")
             content = response.json()["choices"][0]["message"]["content"]
             try:
                 return parse_json_object(content)
@@ -54,7 +54,7 @@ class TextModelClient:
                     "temperature": 0,
                 }
                 repaired = await client.post("/chat/completions", headers=headers, json=repair_payload)
-                repaired.raise_for_status()
+                _raise_for_status(repaired, "doubao_text_json_repair_failed")
                 fixed = repaired.json()["choices"][0]["message"]["content"]
                 return parse_json_object(fixed)
 
@@ -80,14 +80,30 @@ class ImageModelClient:
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         async with httpx.AsyncClient(base_url=self.settings.ark_base_url, timeout=120) as client:
             for index, prompt in enumerate(prompts):
+                clean_prompt = self._clean_prompt(prompt)
                 payload = {
                     "model": self.settings.doubao_image_model,
-                    "prompt": prompt,
-                    "response_format": "b64_json",
-                    "size": self._ratio_to_size(ratio),
+                    "prompt": clean_prompt,
+                    "size": self.settings.doubao_image_size,
+                    "output_format": "png",
+                    "response_format": "url",
+                    "watermark": False,
                 }
                 response = await client.post("/images/generations", headers=headers, json=payload)
-                response.raise_for_status()
+                try:
+                    _raise_for_status(response, "doubao_image_request_failed")
+                except RuntimeError as exc:
+                    if "InvalidParameter" not in str(exc) or "prompt" not in str(exc):
+                        raise
+                    payload["prompt"] = self._fallback_prompt(clean_prompt, ratio)
+                    response = await client.post("/images/generations", headers=headers, json=payload)
+                    try:
+                        _raise_for_status(response, "doubao_image_retry_failed")
+                    except RuntimeError as retry_exc:
+                        raise RuntimeError(
+                            f"{retry_exc}; original_prompt={clean_prompt[:200]!r}; "
+                            f"retry_prompt={payload['prompt'][:200]!r}"
+                        ) from retry_exc
                 body = response.json()
                 data, content_type, extension = await self._image_bytes_from_response(client, body)
                 key = stable_asset_key(f"generated/{run_id}", data, extension)
@@ -95,7 +111,7 @@ class ImageModelClient:
                 results.append(
                     {
                         "image_url": url,
-                        "prompt": prompt,
+                        "prompt": clean_prompt,
                         "ratio": ratio,
                         "sort_order": index,
                         "provider_response": {"model": self.settings.doubao_image_model},
@@ -114,7 +130,7 @@ class ImageModelClient:
             return base64.b64decode(item["b64_json"]), "image/png", "png"
         if item.get("url"):
             response = await client.get(item["url"])
-            response.raise_for_status()
+            _raise_for_status(response, "doubao_image_download_failed")
             content_type = response.headers.get("content-type", "image/png").split(";")[0].strip()
             extension = {
                 "image/jpeg": "jpg",
@@ -146,10 +162,20 @@ class ImageModelClient:
             "provider_response": {"mock": True},
         }
 
-    def _ratio_to_size(self, ratio: str) -> str:
-        return {
-            "1:1": "1024x1024",
-            "3:4": "864x1152",
-            "4:3": "1152x864",
-            "9:16": "720x1280",
-        }.get(ratio, "864x1152")
+    def _clean_prompt(self, prompt: Any) -> str:
+        if isinstance(prompt, dict):
+            prompt = prompt.get("prompt") or prompt.get("text") or prompt.get("description") or prompt.get("content") or ""
+        text = " ".join(str(prompt or "").replace("\u0000", " ").split())
+        return text[:800] or "小红书封面图，清爽真实，中文排版，白底，生活方式内容"
+
+    def _fallback_prompt(self, prompt: str, ratio: str) -> str:
+        topic = prompt[:120]
+        return f"小红书图文笔记封面，主题：{topic}。清爽真实，白底，中文留白排版，适合收藏"
+
+
+def _raise_for_status(response: httpx.Response, label: str) -> None:
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        body = response.text[:1000]
+        raise RuntimeError(f"{label}: HTTP {response.status_code} {body}") from exc

@@ -20,7 +20,7 @@ const accountForm = reactive({ displayName: '小红书主账号', workerId: 'loc
 const createForm = reactive({
   instruction: '帮我写一篇介绍 AI 自动化小红书运营工作流的笔记',
   imageCount: 3,
-  imageRatio: '3:4',
+  imageRatio: '2K',
   styleHint: '专业但亲切，适合收藏',
   targetAudienceHint: '内容运营、独立开发者、小团队创业者',
   mode: 'advanced'
@@ -43,6 +43,7 @@ const remoteText = ref('')
 const remoteDismissed = ref(false)
 const remoteViewScale = ref(1)
 const lastRemoteClickText = ref('')
+const brokenImageUrls = ref<string[]>([])
 let browserSocket: WebSocket | null = null
 
 const isAuthed = computed(() => Boolean(state.token))
@@ -121,7 +122,10 @@ async function addAccount() {
 }
 
 async function createRun() {
-  await withLoading('run', async () => {
+  if (loading.value) return
+  loading.value = 'run'
+  error.value = ''
+  try {
     run.value = await api<AgentRun>('/api/agent/runs', {
       method: 'POST',
       body: JSON.stringify({
@@ -133,12 +137,34 @@ async function createRun() {
         mode: createForm.mode
       })
     })
-  })
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+    loading.value = ''
+    return
+  }
+  loading.value = ''
+  await pollAgentRun(run.value.id)
+}
+
+async function pollAgentRun(runId: string) {
+  const terminalStatuses = new Set(['draft_ready', 'failed'])
+  for (let index = 0; index < 240; index += 1) {
+    if (terminalStatuses.has(String(run.value?.status))) return
+    await new Promise((resolve) => window.setTimeout(resolve, 1000))
+    try {
+      run.value = await api<AgentRun>(`/api/agent/runs/${runId}`)
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err)
+      return
+    }
+  }
+  error.value = '生成仍在运行，请稍后刷新结果'
 }
 
 async function regenerate(target: string) {
   if (!run.value) return
   await withLoading(`regen-${target}`, async () => {
+    if (target === 'images') brokenImageUrls.value = []
     run.value = await api<AgentRun>(`/api/agent/runs/${run.value?.id}/regenerate`, {
       method: 'POST',
       body: JSON.stringify({ target, image_count: createForm.imageCount })
@@ -154,7 +180,7 @@ async function saveDraft() {
     const updated = await api<AgentRun['draft']>(`/api/drafts/${draft.id}`, {
       method: 'PATCH',
       body: JSON.stringify({
-        selected_title: draft.selected_title.slice(0, 20),
+        selected_title: limitTitle(draft.selected_title),
         body: draft.body,
         hashtags: draft.hashtags
       })
@@ -372,6 +398,14 @@ function clickRemoteFrame(event: MouseEvent) {
   })
 }
 
+function limitTitle(title: string) {
+  return title.replace(/\s+/g, ' ').trim().slice(0, 20)
+}
+
+function markImageBroken(url: string) {
+  if (!brokenImageUrls.value.includes(url)) brokenImageUrls.value.push(url)
+}
+
 refreshSettings()
 </script>
 
@@ -437,15 +471,6 @@ refreshSettings()
             <input v-model.number="createForm.imageCount" min="1" max="9" type="number" />
           </label>
           <label>
-            图片比例
-            <select v-model="createForm.imageRatio">
-              <option>3:4</option>
-              <option>1:1</option>
-              <option>4:3</option>
-              <option>9:16</option>
-            </select>
-          </label>
-          <label>
             风格
             <input v-model="createForm.styleHint" />
           </label>
@@ -467,6 +492,7 @@ refreshSettings()
             <h2>ReAct Trace</h2>
             <span>{{ run.status }}</span>
           </div>
+          <p v-if="run.failure_reason" class="error">{{ run.failure_reason }}</p>
           <ol>
             <li v-for="step in run.steps" :key="step.id">
               <strong>{{ step.step }}</strong>
@@ -496,9 +522,9 @@ refreshSettings()
               v-for="title in selectedDraft.title_candidates"
               :key="title"
               :class="{ selected: selectedDraft.selected_title === title }"
-              @click="selectedDraft.selected_title = title"
+              @click="selectedDraft.selected_title = limitTitle(title)"
             >
-              {{ title }}
+              {{ limitTitle(title) }}
             </button>
           </div>
 
@@ -510,10 +536,13 @@ refreshSettings()
 
           <div class="image-grid">
             <figure v-for="image in selectedDraft.images" :key="image.id">
-              <img :src="image.image_url" :alt="image.prompt" />
+              <img :src="image.image_url" :alt="image.prompt" @error="markImageBroken(image.image_url)" />
               <figcaption>{{ image.prompt }}</figcaption>
             </figure>
           </div>
+          <p v-if="brokenImageUrls.length" class="error">
+            图片加载失败：{{ brokenImageUrls.join('，') }}
+          </p>
 
           <div class="safety">
             <ShieldCheck />

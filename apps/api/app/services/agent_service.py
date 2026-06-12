@@ -7,7 +7,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from agent_core import AgentEvent, AgentRuntime, Tool, ToolCall, ToolRegistry
+from agent_core import AgentEvent, AgentRuntime, AgentStep, Tool, ToolCall, ToolRegistry
 from app.core.security import decrypt_secret
 from app.models import AgentRun, AgentStepRecord, DraftImage, DraftNote, ModelKey
 from app.services.model_clients import ImageModelClient, TextModelClient
@@ -26,6 +26,21 @@ class AgentService:
         await self.db.commit()
         return await self.get_run(user_id, run.id)
 
+    async def create_run_record(self, user_id: str, instruction: str, config: dict[str, Any]) -> AgentRun:
+        run = AgentRun(user_id=user_id, instruction=instruction, config=config, status="running")
+        self.db.add(run)
+        await self.db.commit()
+        return await self.get_run(user_id, run.id)
+
+    async def execute_existing_run(self, user_id: str, run_id: str) -> AgentRun:
+        run = await self.get_run(user_id, run_id)
+        run.status = "running"
+        run.failure_reason = None
+        await self.db.flush()
+        await self._execute(run)
+        await self.db.commit()
+        return await self.get_run(user_id, run.id)
+
     async def get_run(self, user_id: str, run_id: str) -> AgentRun:
         result = await self.db.execute(
             select(AgentRun)
@@ -34,6 +49,7 @@ class AgentService:
                 selectinload(AgentRun.steps),
                 selectinload(AgentRun.draft).selectinload(DraftNote.images),
             )
+            .execution_options(populate_existing=True)
         )
         run = result.scalar_one()
         run.steps.sort(key=lambda item: item.created_at)
@@ -149,26 +165,39 @@ class AgentService:
 
         async def generate_image_prompts(payload: dict[str, Any]) -> dict[str, Any]:
             count = int(run.config.get("image_count", 3))
-            ratio = run.config.get("image_ratio", "3:4")
+            image_size = run.config.get("image_ratio", "2K")
             fallback = {
                 "image_prompts": [
-                    f"小红书封面图，主题：{run.instruction}，清爽真实，中文留白排版，比例 {ratio}"
+                    f"小红书封面图，主题：{run.instruction}，清爽真实，中文留白排版，图片规格 {image_size}"
                     for _ in range(count)
                 ]
             }
-            return await text_client.chat_json(
+            result = await text_client.chat_json(
                 "你是商业插画和小红书封面提示词专家。只返回 JSON。",
-                f"生成 {count} 个图片提示词，比例 {ratio}，上下文：{payload['memory']}",
+                f"生成 {count} 个图片提示词，固定图片规格 {image_size}，上下文：{payload['memory']}",
                 fallback,
                 temperature=0.7,
             )
+            result["image_prompts"] = _ensure_image_prompts(
+                _normalize_prompt_list(result.get("image_prompts", []), count),
+                run.instruction,
+                image_size,
+                count,
+            )
+            return result
 
         async def generate_images(payload: dict[str, Any]) -> dict[str, Any]:
             prompts = payload["memory"].get("generate_image_prompts", {}).get("image_prompts", [])
-            prompts = prompts[: int(run.config.get("image_count", 3))]
+            prompts = _normalize_prompt_list(prompts, int(run.config.get("image_count", 3)))
+            prompts = _ensure_image_prompts(
+                prompts,
+                run.instruction,
+                run.config.get("image_ratio", "2K"),
+                int(run.config.get("image_count", 3)),
+            )
             images = await image_client.generate_images(
                 prompts,
-                run.config.get("image_ratio", "3:4"),
+                run.config.get("image_ratio", "2K"),
                 run.id,
             )
             return {"images": images}
@@ -225,6 +254,7 @@ class AgentService:
                 await self.db.execute(delete(DraftImage).where(DraftImage.draft_id == draft.id))
                 for image in images:
                     self.db.add(DraftImage(draft_id=draft.id, **image))
+                self.db.expire(draft, ["images"])
             run.status = "draft_ready"
             await self.db.flush()
             return {"draft_id": draft.id}
@@ -264,8 +294,40 @@ class AgentService:
         plan = self._plan(only)
         steps = await runtime.run_plan(UUID(run.id), plan)
         if steps and steps[-1].status.value == "failed":
+            await self._save_partial_draft(run, steps)
             run.status = "failed"
             run.failure_reason = steps[-1].error
+        await self.db.flush()
+
+    async def _save_partial_draft(self, run: AgentRun, steps: list[AgentStep]) -> None:
+        memory = {step.step: step.observation for step in steps if step.status.value == "succeeded"}
+        if not any(key in memory for key in ("generate_titles", "generate_body", "generate_hashtags")):
+            return
+
+        result = await self.db.execute(select(DraftNote).where(DraftNote.run_id == run.id))
+        draft = result.scalar_one_or_none()
+        if not draft:
+            draft = DraftNote(run_id=run.id, user_id=run.user_id)
+
+        titles = memory.get("generate_titles", {}).get("titles", [])
+        if titles:
+            draft.title_candidates = [_limit_title(title) for title in titles]
+            draft.selected_title = _limit_title(titles[0])
+
+        body = memory.get("generate_body", {}).get("body")
+        if body:
+            draft.body = str(body)
+
+        hashtags = memory.get("generate_hashtags", {}).get("hashtags")
+        if isinstance(hashtags, list):
+            draft.hashtags = [str(tag).strip().lstrip("#") for tag in hashtags if str(tag).strip()]
+
+        intent = memory.get("identify_intent", {})
+        if intent:
+            draft.style = _limit_text(intent.get("style", draft.style), 120)
+            draft.target_audience = _limit_text(intent.get("target_audience", draft.target_audience), 255)
+
+        self.db.add(draft)
         await self.db.flush()
 
     def _plan(self, only: str | None) -> list[tuple[str, str, ToolCall]]:
@@ -308,4 +370,38 @@ def _limit_text(value: Any, max_length: int) -> str:
 
 
 def _limit_title(value: Any) -> str:
-    return _limit_text(value, 20)
+    text = " ".join(_limit_text(value, 80).split())
+    return text[:20]
+
+
+def _normalize_prompt_list(values: Any, count: int) -> list[str]:
+    if not isinstance(values, list):
+        values = [values]
+    prompts: list[str] = []
+    for item in values:
+        if isinstance(item, dict):
+            text = item.get("prompt") or item.get("text") or item.get("description") or item.get("content") or ""
+        else:
+            text = item
+        prompt = _clean_image_prompt(text)
+        if prompt:
+            prompts.append(prompt)
+        if len(prompts) >= count:
+            break
+    return prompts
+
+
+def _clean_image_prompt(value: Any) -> str:
+    text = "" if value is None else str(value)
+    text = " ".join(text.replace("\u0000", " ").split())
+    return text[:800]
+
+
+def _ensure_image_prompts(prompts: list[str], instruction: str, image_size: str, count: int) -> list[str]:
+    result = list(prompts[:count])
+    while len(result) < count:
+        index = len(result) + 1
+        result.append(
+            f"小红书图文笔记配图 {index}，主题：{instruction}。清爽真实，中文留白排版，适合收藏，图片规格 {image_size}"
+        )
+    return result

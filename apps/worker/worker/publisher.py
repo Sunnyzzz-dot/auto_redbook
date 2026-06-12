@@ -320,6 +320,8 @@ class XiaohongshuPublisher:
 
         await self._select_image_publish_tab(page)
         images = await self._prepare_images(draft.get("images", []), job.get("job_id", "job"), page)
+        if not images:
+            raise RuntimeError("draft_images_missing")
         await self._upload_images(page, images)
         await self._try_fill(page, ["input[placeholder*='标题']", "textarea[placeholder*='标题']"], title)
         await self._try_fill(
@@ -368,7 +370,11 @@ class XiaohongshuPublisher:
 
         multiple = await upload_input.get_attribute("multiple")
         await upload_input.set_input_files(images if multiple is not None or len(images) == 1 else images[0])
-        await page.wait_for_timeout(1500)
+        for _ in range(60):
+            await page.wait_for_timeout(1000)
+            if await page.locator("input[placeholder*='标题'], textarea[placeholder*='标题']").count() > 0:
+                return
+        raise RuntimeError("image_upload_editor_not_ready")
 
     async def _find_image_upload_input(self, page: Page):
         inputs = page.locator("input[type='file']")

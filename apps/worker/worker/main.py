@@ -16,6 +16,7 @@ async def run_worker() -> None:
         query["token"] = settings.worker_token
     uri = f"{settings.api_ws_url}/api/workers/connect?{urlencode(query)}"
     publisher = XiaohongshuPublisher()
+    print(f"worker connecting to {uri}")
 
     while True:
         try:

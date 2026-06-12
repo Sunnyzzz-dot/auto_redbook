@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     doubao_text_model: str = "doubao-seed-2-0-lite-260215"
     doubao_image_model: str = "doubao-seedream-5-0-260128"
+    doubao_image_size: str = "2K"
     allow_mock_models: bool = True
     jwt_expires_minutes: int = 10080
 
