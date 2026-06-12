@@ -20,4 +20,4 @@ COPY apps/worker ./apps/worker
 
 WORKDIR /app/apps/worker
 
-CMD ["xvfb-run", "-a", "python", "-m", "worker.main"]
+CMD ["python", "-u", "-m", "worker.main"]

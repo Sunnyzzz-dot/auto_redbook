@@ -100,7 +100,7 @@ services:
       API_WS_URL: ws://api:8000
       BROWSER_PROFILES_DIR: /app/apps/worker/profiles
       SCREENSHOTS_DIR: /app/apps/worker/screenshots
-      HEADLESS: "false"
+      HEADLESS: "true"
       WORKER_ID: ${WORKER_ID:-cloud-worker}
       MACHINE_NAME: ${MACHINE_NAME:-volcengine-ecs}
     volumes:

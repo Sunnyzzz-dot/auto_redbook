@@ -73,6 +73,16 @@ URL-encode it inside `DATABASE_URL` and `SYNC_DATABASE_URL`.
 download generated images from the API container without hitting the self-signed
 public HTTPS endpoint.
 
+The production worker runs Chromium in headless mode by default:
+
+```env
+HEADLESS=true
+```
+
+Remote takeover still works because it streams Playwright screenshots and sends
+mouse/keyboard events back to the page. A physical monitor or desktop session is
+not required.
+
 ## 4. Create a self-signed certificate
 
 ```bash
@@ -108,6 +118,16 @@ docker compose -f infra/docker-compose.prod.yml --env-file .env.production logs 
 docker compose -f infra/docker-compose.prod.yml --env-file .env.production logs -f worker
 docker compose -f infra/docker-compose.prod.yml --env-file .env.production logs -f nginx
 ```
+
+Confirm that the worker registered with the API:
+
+```bash
+docker compose -f infra/docker-compose.prod.yml --env-file .env.production exec postgres \
+  psql -U redbook -d redbook_agent \
+  -c "select id, machine_name, status, last_seen_at from workers order by last_seen_at desc;"
+```
+
+The expected worker id should match `WORKER_ID` in `.env.production`.
 
 ## 6. Verify the deployment
 
