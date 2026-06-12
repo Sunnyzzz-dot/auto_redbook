@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     s3_public_base_url: str | None = "http://localhost:9000/redbook-agent"
     local_upload_dir: str = "uploads"
     public_upload_base_url: str = "http://localhost:8000/uploads"
+    worker_asset_base_url: str | None = None
     cors_origins: str = (
         "http://localhost:5173,"
         "http://127.0.0.1:5173,"
@@ -28,6 +29,7 @@ class Settings(BaseSettings):
     )
     worker_token: str = ""
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
+    ark_api_key: str | None = None
     doubao_text_model: str = "doubao-seed-2-0-lite-260215"
     doubao_image_model: str = "doubao-seedream-5-0-260128"
     doubao_image_size: str = "2K"

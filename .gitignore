@@ -12,10 +12,12 @@ __pycache__/
 *.egg-info/
 .coverage
 .env
+.env.production
 apps/web/.env
 apps/worker/profiles/
 apps/worker/screenshots/
 apps/api/uploads/
+infra/certs/
 coverage/
 playwright-report/
 test-results/

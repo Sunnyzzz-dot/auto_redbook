@@ -49,7 +49,8 @@ async def create_publish_job(
 
     if account.bound_worker_id:
         draft_payload = serialize_draft(draft)
-        base_url = str(request.base_url).rstrip("/")
+        settings = get_settings()
+        base_url = (settings.worker_asset_base_url or str(request.base_url)).rstrip("/")
         for image in draft_payload["images"]:
             image["image_url"] = f"{base_url}/api/publish-assets/{image['id']}"
         sent = await worker_hub.send_job(

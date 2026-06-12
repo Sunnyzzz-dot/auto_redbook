@@ -360,7 +360,7 @@ class AgentService:
         )
         key = result.scalars().first()
         if not key:
-            return None
+            return self.settings.ark_api_key
         return decrypt_secret(key.encrypted_api_key)
 
 

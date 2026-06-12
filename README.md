@@ -77,3 +77,8 @@ One-line instruction
 ## Safety Boundary
 
 The worker never attempts to bypass login, CAPTCHA, or platform risk-control flows. When such a page is detected, the job moves to `requires_human_intervention` and exposes a remote browser-control session for the account owner.
+
+## Deployment
+
+For a single-server Volcengine ECS demo deployment with Docker Compose, see
+[`docs/deploy-volcengine-ecs.md`](docs/deploy-volcengine-ecs.md).
