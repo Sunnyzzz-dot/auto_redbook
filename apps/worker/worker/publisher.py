@@ -464,7 +464,7 @@ class XiaohongshuPublisher:
 
     async def _scroll_publish_controls_into_view(self, page: Page) -> None:
         await page.keyboard.press("Escape")
-        await self._browser_zoom(page, 5, reset=True)
+        await self._reset_browser_view(page)
         await page.evaluate(
             """
             () => {
@@ -587,7 +587,7 @@ class XiaohongshuPublisher:
                   forceBottom();
 
                   const hostRows = Array.from(document.querySelectorAll('xhs-publish-btn'))
-                    .map((host) => {
+                    .map((host, hostIndex) => {
                       const rect = host.getBoundingClientRect();
                       const style = window.getComputedStyle(host);
                       const shadowButton = host.shadowRoot
@@ -600,6 +600,7 @@ class XiaohongshuPublisher:
                           element: host,
                           shadowButton,
                           strategy: 'xhs-publish-btn-shadow',
+                          hostIndex,
                           text: shadowButton.innerText || host.getAttribute('submit-text') || '',
                           tag: host.tagName,
                           className: String(host.className || ''),
@@ -629,6 +630,7 @@ class XiaohongshuPublisher:
                         element: host,
                         shadowButton: null,
                         strategy: 'xhs-publish-btn-host-geometry',
+                        hostIndex,
                         text: host.getAttribute('submit-text') || '',
                         tag: host.tagName,
                         className: String(host.className || ''),
@@ -679,9 +681,11 @@ class XiaohongshuPublisher:
                         topClassName: top ? String(top.className || '') : null,
                         isTopSelf: top === target.element || target.element.contains(top),
                         strategy: target.strategy,
+                        hostIndex: target.hostIndex,
                       },
                       candidates: hostRows.slice(0, 3).map((row) => ({
                         strategy: row.strategy,
+                        hostIndex: row.hostIndex,
                         text: row.text,
                         tag: row.tag,
                         className: row.className,
@@ -870,11 +874,30 @@ class XiaohongshuPublisher:
             target = info.get("target") if isinstance(info, dict) else None
             if target:
                 before_url = page.url
+                if str(target.get("tag", "")).upper() == "XHS-PUBLISH-BTN":
+                    try:
+                        host_rect = target.get("hostRect") or target.get("rect") or {}
+                        position = {
+                            "x": float(target["x"]) - float(host_rect.get("x", 0)),
+                            "y": float(target["y"]) - float(host_rect.get("y", 0)),
+                        }
+                        await page.locator("xhs-publish-btn").nth(int(target.get("hostIndex", 0))).click(
+                            position=position,
+                            force=True,
+                            timeout=3000,
+                        )
+                        await page.wait_for_timeout(1000)
+                        if page.url != before_url and ("from=menu" in page.url or "target=video" in page.url):
+                            return False
+                        if page.url != before_url:
+                            return True
+                        if await self._has_publish_confirmation(page) or await self._is_publish_success(page):
+                            return True
+                    except Exception as exc:
+                        print(f"publish_button_host_click_failed: {exc}", flush=True)
                 await page.mouse.move(float(target["x"]), float(target["y"]))
                 await page.wait_for_timeout(150)
-                await page.mouse.down()
-                await page.wait_for_timeout(120)
-                await page.mouse.up()
+                await page.mouse.click(float(target["x"]), float(target["y"]), delay=120)
                 await page.wait_for_timeout(1000)
                 if page.url != before_url and ("from=menu" in page.url or "target=video" in page.url):
                     return False
@@ -925,7 +948,10 @@ class XiaohongshuPublisher:
                 if clicked:
                     if page.url != before_url and ("from=menu" in page.url or "target=video" in page.url):
                         return False
-                    return True
+                    if page.url != before_url:
+                        return True
+                    if await self._has_publish_confirmation(page) or await self._is_publish_success(page):
+                        return True
 
             await self._nudge_publish_controls(page)
 
@@ -944,7 +970,9 @@ class XiaohongshuPublisher:
         await page.wait_for_timeout(1000)
         if page.url != before_url and ("from=menu" in page.url or "target=video" in page.url):
             return False
-        return True
+        if page.url != before_url:
+            return True
+        return await self._has_publish_confirmation(page) or await self._is_publish_success(page)
 
     async def _has_publish_confirmation(self, page: Page) -> bool:
         return bool(
