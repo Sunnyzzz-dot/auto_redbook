@@ -214,11 +214,18 @@ async function pollPublishJob(jobId: string) {
     'requires_human_intervention',
     'awaiting_manual_approval'
   ])
-  for (let index = 0; index < 30; index += 1) {
+  for (let index = 0; index < 420; index += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 1000))
-    publishJob.value = await api<Record<string, unknown>>(`/api/publish-jobs/${jobId}`)
+    try {
+      publishJob.value = await api<Record<string, unknown>>(`/api/publish-jobs/${jobId}`)
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err)
+      if (index > 5) return
+      continue
+    }
     if (terminalStatuses.has(String(publishJob.value.status))) return
   }
+  error.value = '发布任务仍在运行，请稍后刷新任务状态'
 }
 
 async function openRemoteControl() {
