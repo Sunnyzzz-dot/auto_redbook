@@ -77,11 +77,16 @@ The production worker runs Chromium in headless mode by default:
 
 ```env
 HEADLESS=true
+PUBLISH_TIMEOUT_SECONDS=300
 ```
 
 Remote takeover still works because it streams Playwright screenshots and sends
 mouse/keyboard events back to the page. A physical monitor or desktop session is
 not required.
+
+`PUBLISH_TIMEOUT_SECONDS` is the worker-side safety timeout for one publish job.
+If the worker cannot finish within this time, it reports the job as failed with
+`publish_timeout` instead of leaving it stuck in `sent_to_worker`.
 
 ## 4. Create a self-signed certificate
 

@@ -15,6 +15,8 @@ class WorkerSettings(BaseSettings):
     screenshots_dir: str = "screenshots"
     headless: bool = False
     xhs_creator_url: str = "https://creator.xiaohongshu.com/publish/publish"
+    publish_timeout_seconds: int = 300
+    status_callback_retries: int = 5
 
 
 settings = WorkerSettings()

@@ -29,6 +29,10 @@ class ActiveBrowserSession:
     stage: str
 
 
+def _log(job_id: str, message: str) -> None:
+    print(f"publish_job {job_id}: {message}", flush=True)
+
+
 def _png_dimensions(image: bytes) -> tuple[int | None, int | None]:
     if len(image) >= 24 and image.startswith(b"\x89PNG\r\n\x1a\n"):
         return struct.unpack(">II", image[16:24])
@@ -41,12 +45,14 @@ class XiaohongshuPublisher:
         self._active_sessions: dict[str, ActiveBrowserSession] = {}
 
     async def publish(self, job: dict[str, Any]) -> PublishResult:
+        job_id = job.get("job_id", "unknown-job")
         account_id = job.get("account_id", "default")
         profile_path = Path(settings.browser_profiles_dir) / account_id
         profile_path.mkdir(parents=True, exist_ok=True)
         Path(settings.screenshots_dir).mkdir(parents=True, exist_ok=True)
 
         playwright = await self._get_playwright()
+        _log(job_id, "launch_browser")
         context = await playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile_path),
             headless=settings.headless,
@@ -57,18 +63,25 @@ class XiaohongshuPublisher:
         await page.set_viewport_size({"width": 1920, "height": 1080})
         await self._reset_browser_view(page)
         try:
+            _log(job_id, "open_xhs_creator")
             await page.goto(settings.xhs_creator_url, wait_until="domcontentloaded", timeout=60000)
             await self._reset_browser_view(page)
             await page.wait_for_timeout(1500)
+            _log(job_id, "check_login_or_risk_control")
             if await self._needs_human(page):
+                _log(job_id, "requires_human_intervention")
                 return await self._human_required(context, page, job, "login_or_risk_control_required")
 
+            _log(job_id, "fill_note")
             await self._fill_note(page, job)
             if job.get("publish_mode") == "auto_publish":
+                _log(job_id, "auto_publish")
                 result = await self._auto_publish(context, page, job)
                 if result:
+                    _log(job_id, f"auto_publish_result {result.status}")
                     return result
 
+            _log(job_id, "await_manual_approval")
             screenshot = await self._screenshot(page, job["job_id"])
             self._active_sessions[job["job_id"]] = ActiveBrowserSession(
                 context=context,
@@ -77,7 +90,7 @@ class XiaohongshuPublisher:
                 stage="awaiting_manual_approval",
             )
             return PublishResult(status="awaiting_manual_approval", screenshot_path=screenshot)
-        except Exception:
+        except BaseException:
             await context.close()
             raise
 
@@ -312,17 +325,22 @@ class XiaohongshuPublisher:
         }
 
     async def _fill_note(self, page: Page, job: dict[str, Any]) -> None:
+        job_id = job.get("job_id", "unknown-job")
         draft = job.get("draft", {})
         title = str(draft.get("selected_title", ""))[:20]
         body = draft.get("body", "")
         hashtags = " ".join(f"#{tag}" for tag in draft.get("hashtags", []))
         text = f"{body}\n\n{hashtags}".strip()
 
+        _log(job_id, "select_image_publish_tab")
         await self._select_image_publish_tab(page)
+        _log(job_id, "prepare_images")
         images = await self._prepare_images(draft.get("images", []), job.get("job_id", "job"), page)
         if not images:
             raise RuntimeError("draft_images_missing")
+        _log(job_id, f"upload_images count={len(images)}")
         await self._upload_images(page, images)
+        _log(job_id, "fill_title_and_body")
         await self._try_fill(page, ["input[placeholder*='标题']", "textarea[placeholder*='标题']"], title)
         await self._try_fill(
             page,
@@ -404,17 +422,24 @@ class XiaohongshuPublisher:
     async def _auto_publish(
         self, context: BrowserContext, page: Page, job: dict[str, Any]
     ) -> PublishResult | None:
+        job_id = job.get("job_id", "unknown-job")
+        _log(job_id, "click_publish_button")
         clicked = await self._click_publish(page)
         if not clicked:
+            _log(job_id, "publish_button_not_found")
             return await self._manual_publish_required(
                 context, page, job, "publish_button_not_found"
             )
 
+        _log(job_id, "click_publish_confirmation")
         await self._click_publish_confirmation(page)
+        _log(job_id, "wait_for_publish_result")
         if await self._wait_for_publish_success(page):
+            _log(job_id, "published")
             await context.close()
             return PublishResult(status="published", result_url=page.url)
 
+        _log(job_id, "auto_publish_success_not_detected")
         return await self._manual_publish_required(
             context, page, job, "auto_publish_success_not_detected"
         )
@@ -423,6 +448,7 @@ class XiaohongshuPublisher:
         self, context: BrowserContext, page: Page, job: dict[str, Any], reason: str
     ) -> PublishResult:
         job_id = job["job_id"]
+        _log(job_id, f"manual_publish_required reason={reason}")
         screenshot = await self._screenshot(page, job_id)
         self._active_sessions[job_id] = ActiveBrowserSession(
             context=context,
@@ -1061,6 +1087,7 @@ class XiaohongshuPublisher:
         self, context: BrowserContext, page: Page, job: dict[str, Any], reason: str
     ) -> PublishResult:
         job_id = job["job_id"]
+        _log(job_id, f"human_required reason={reason}")
         screenshot = await self._screenshot(page, job_id)
         self._active_sessions[job_id] = ActiveBrowserSession(
             context=context,

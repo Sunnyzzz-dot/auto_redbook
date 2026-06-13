@@ -26,6 +26,15 @@ class PublishJobResponse(BaseModel):
     updated_at: datetime
 
 
+class WorkerJobStatusUpdate(BaseModel):
+    worker_id: str | None = None
+    status: str
+    failure_reason: str | None = None
+    result_url: str | None = None
+    screenshot_url: str | None = None
+    session_id: str | None = None
+
+
 class BrowserSessionResponse(BaseModel):
     id: str
     job_id: str

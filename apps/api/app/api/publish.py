@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -11,7 +20,12 @@ from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal, get_db
 from app.core.security import decode_access_token
 from app.models import BrowserSession, DraftImage, DraftNote, PublishJob, User, Worker, XhsAccount
-from app.schemas.publish import BrowserSessionResponse, PublishJobCreate, PublishJobResponse
+from app.schemas.publish import (
+    BrowserSessionResponse,
+    PublishJobCreate,
+    PublishJobResponse,
+    WorkerJobStatusUpdate,
+)
 from app.services.storage import ObjectStorage
 from app.services.worker_hub import worker_hub
 
@@ -112,6 +126,34 @@ async def approve_publish_job(
     return serialize_job(job)
 
 
+@router.post("/workers/jobs/{job_id}/status", response_model=PublishJobResponse)
+async def update_worker_job_status(
+    job_id: str,
+    payload: WorkerJobStatusUpdate,
+    authorization: str | None = Header(default=None),
+) -> PublishJobResponse:
+    expected_token = get_settings().worker_token
+    if expected_token:
+        expected = f"Bearer {expected_token}"
+        if authorization != expected:
+            raise HTTPException(status_code=403, detail="Invalid worker token")
+
+    async with AsyncSessionLocal() as db:
+        job = await _apply_job_status(
+            db,
+            job_id=job_id,
+            worker_id=payload.worker_id or "unknown-worker",
+            status=payload.status,
+            failure_reason=payload.failure_reason,
+            result_url=payload.result_url,
+            screenshot_url=payload.screenshot_url,
+            session_id=payload.session_id,
+        )
+        if not job:
+            raise HTTPException(status_code=404, detail="Publish job not found")
+        return serialize_job(job)
+
+
 @router.get("/publish-jobs/{job_id}/browser-session", response_model=BrowserSessionResponse)
 async def get_browser_session(
     job_id: str,
@@ -174,34 +216,16 @@ async def handle_worker_message(worker_id: str, message: dict) -> None:
     session_id = message.get("session_id")
     async with AsyncSessionLocal() as db:
         if message.get("type") == "job_status":
-            job = await db.get(PublishJob, message.get("job_id"))
-            if job:
-                job.worker_id = worker_id
-                job.status = message.get("status", job.status)
-                job.failure_reason = message.get("failure_reason")
-                job.result_url = message.get("result_url")
-                job.screenshot_url = message.get("screenshot_url")
-                if job.status in {"requires_human_intervention", "awaiting_manual_approval"}:
-                    session = await db.scalar(
-                        select(BrowserSession).where(
-                            BrowserSession.job_id == job.id,
-                            BrowserSession.status == "active",
-                        )
-                    )
-                    if not session:
-                        db.add(BrowserSession(job_id=job.id))
-                elif job.status in {"published", "failed"}:
-                    sessions = await db.scalars(
-                        select(BrowserSession).where(
-                            BrowserSession.job_id == job.id,
-                            BrowserSession.status == "active",
-                        )
-                    )
-                    for session in sessions:
-                        session.status = "closed"
-                await db.commit()
-                if session_id:
-                    await worker_hub.forward_browser_frame(session_id, message)
+            await _apply_job_status(
+                db,
+                job_id=message.get("job_id"),
+                worker_id=worker_id,
+                status=message.get("status"),
+                failure_reason=message.get("failure_reason"),
+                result_url=message.get("result_url"),
+                screenshot_url=message.get("screenshot_url"),
+                session_id=session_id,
+            )
 
 
 @router.websocket("/browser-sessions/{session_id}")
@@ -266,3 +290,62 @@ def serialize_job(job: PublishJob) -> PublishJobResponse:
         created_at=job.created_at,
         updated_at=job.updated_at,
     )
+
+
+async def _apply_job_status(
+    db: AsyncSession,
+    job_id: str | None,
+    worker_id: str,
+    status: str | None,
+    failure_reason: str | None = None,
+    result_url: str | None = None,
+    screenshot_url: str | None = None,
+    session_id: str | None = None,
+) -> PublishJob | None:
+    if not job_id:
+        return None
+    job = await db.get(PublishJob, job_id)
+    if not job:
+        return None
+
+    job.worker_id = worker_id
+    if status:
+        job.status = status
+    job.failure_reason = failure_reason
+    job.result_url = result_url
+    job.screenshot_url = screenshot_url
+
+    if job.status in {"requires_human_intervention", "awaiting_manual_approval"}:
+        session = await db.scalar(
+            select(BrowserSession).where(
+                BrowserSession.job_id == job.id,
+                BrowserSession.status == "active",
+            )
+        )
+        if not session:
+            db.add(BrowserSession(job_id=job.id))
+    elif job.status in {"published", "failed"}:
+        sessions = await db.scalars(
+            select(BrowserSession).where(
+                BrowserSession.job_id == job.id,
+                BrowserSession.status == "active",
+            )
+        )
+        for session in sessions:
+            session.status = "closed"
+
+    await db.commit()
+    await db.refresh(job)
+    if session_id:
+        await worker_hub.forward_browser_frame(
+            session_id,
+            {
+                "type": "job_status",
+                "job_id": job.id,
+                "status": job.status,
+                "failure_reason": job.failure_reason,
+                "result_url": job.result_url,
+                "screenshot_url": job.screenshot_url,
+            },
+        )
+    return job

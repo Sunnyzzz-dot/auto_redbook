@@ -101,6 +101,7 @@ services:
       BROWSER_PROFILES_DIR: /app/apps/worker/profiles
       SCREENSHOTS_DIR: /app/apps/worker/screenshots
       HEADLESS: "true"
+      PUBLISH_TIMEOUT_SECONDS: ${PUBLISH_TIMEOUT_SECONDS:-300}
       WORKER_ID: ${WORKER_ID:-cloud-worker}
       MACHINE_NAME: ${MACHINE_NAME:-volcengine-ecs}
     volumes:
